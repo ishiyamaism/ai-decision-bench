@@ -143,7 +143,7 @@ export TYPESAFE_API_KEY="..."
 export OPENAI_API_KEY="..."
 uv run ai-decision-bench compare \
   --providers typesafe,openai \
-  --openai-model YOUR_MODEL_ID \
+  --openai-model gpt-5.6-luna \
   --dataset datasets/sample.jsonl \
   --output results/comparison.json
 ```
@@ -159,7 +159,7 @@ to `1`. Each adapter uses finite timeouts and retries:
 The summary reports measurements only:
 
 ```text
-mock: [####################] 24/24 (100%) 0.0s
+mock: [####################] Processed 24/24 (100%) 0.0s
 
 Provider  Model                Cases  Accuracy  ECE     Median  P95    Failures  Cost (USD)
 --------  -------------------  -----  --------  ------  ------  -----  --------  ----------
@@ -169,7 +169,12 @@ mock      keyword-baseline-v1  24     100.0%    0.1000  0.0ms   0.0ms  0 (0.0%) 
 Mock values vary by machine and are not real-provider performance results.
 Interactive terminals update the progress bar in place. In redirected output, only the
 start and completion progress lines are written to stderr; the result table remains on
-stdout.
+stdout. `Processed` is the number of completed attempts, not the number of successful
+decisions. Partial failures produce a warning; an all-failed provider produces a clear
+error and a non-zero exit status.
+
+Provider names are not model IDs. For example, use an OpenAI API model ID with
+`--provider openai`; `--model openai` is rejected before any API request starts.
 
 ## Metrics
 
@@ -228,6 +233,9 @@ Use `--output path.json` or `--output path.md`. JSON includes:
 Source dataset inputs, HTTP headers, credentials, and raw provider responses are not
 written. A dataset hash distinguishes files that have the same name but different
 content.
+
+Without `--output`, the summary is displayed but no result file is retained. The CLI
+states this explicitly at the end of a run.
 
 Benchmark results depend on model version, API configuration, dataset, execution date,
 network conditions, and region.

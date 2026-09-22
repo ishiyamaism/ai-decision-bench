@@ -7,6 +7,7 @@ import asyncio
 import os
 import sys
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
@@ -75,7 +76,9 @@ class _ProgressReporter:
         elapsed = time.perf_counter() - self.started
         filled = round(self._BAR_WIDTH * ratio)
         bar = "#" * filled + "-" * (self._BAR_WIDTH - filled)
-        line = f"{self.provider}: [{bar}] {completed}/{total} ({ratio:.0%}) {elapsed:.1f}s"
+        line = (
+            f"{self.provider}: [{bar}] Processed {completed}/{total} ({ratio:.0%}) {elapsed:.1f}s"
+        )
         if self.interactive:
             padding = " " * max(0, self.previous_width - len(line))
             end = "\n" if completed == total else "\r"
@@ -172,6 +175,18 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--pricing-reference-date is required with a pricing override")
     if args.output and args.output.suffix.lower() not in {".json", ".md"}:
         parser.error("--output must end in .json or .md")
+    if args.command == "run" and args.model and args.model.strip().casefold() == args.provider:
+        parser.error(f"--model must be an API model ID, not the provider name '{args.provider}'")
+    if args.command == "compare":
+        provider_models = (
+            ("typesafe", args.typesafe_model, "--typesafe-model"),
+            ("openai", args.openai_model, "--openai-model"),
+        )
+        for provider, model, option in provider_models:
+            if model and model.strip().casefold() == provider:
+                parser.error(
+                    f"{option} must be an API model ID, not the provider name '{provider}'"
+                )
 
 
 def _pricing_for(args: argparse.Namespace, provider: str, model: str | None) -> PricingRate | None:
@@ -278,6 +293,32 @@ def render_summary(reports: list[BenchmarkReport]) -> str:
         "  ".join(value.ljust(widths[index]) for index, value in enumerate(row)) for row in rows[1:]
     ]
     return "\n".join([header, separator, *body])
+
+
+def _failure_notices(reports: list[BenchmarkReport]) -> list[str]:
+    notices: list[str] = []
+    for report in reports:
+        metrics = report.metrics
+        if metrics.failures == 0:
+            continue
+        categories = Counter(
+            item.result.error for item in report.cases if item.result.error is not None
+        )
+        category_text = ", ".join(
+            f"{category}: {count}" for category, count in sorted(categories.items())
+        )
+        if metrics.successful == 0:
+            notices.append(
+                f"error: {report.provider}: all {metrics.total} cases failed; "
+                f"no valid decisions were produced ({category_text}). Check the provider "
+                "and model configuration."
+            )
+        else:
+            notices.append(
+                f"warning: {report.provider}: {metrics.failures} of {metrics.total} cases "
+                f"failed ({category_text})."
+            )
+    return notices
 
 
 def render_markdown(reports: list[BenchmarkReport]) -> str:
@@ -396,7 +437,12 @@ def main(argv: list[str] | None = None) -> int:
     print(render_summary(reports))
     if args.output:
         print(f"\nResult written to: {args.output}")
-    return 0
+    else:
+        print("\nResult not saved. Use --output PATH.json to keep it.")
+    notices = _failure_notices(reports)
+    if notices:
+        print("\n".join(notices), file=sys.stderr)
+    return 1 if any(report.metrics.successful == 0 for report in reports) else 0
 
 
 if __name__ == "__main__":

@@ -210,6 +210,29 @@ def test_cli_has_no_api_key_options_and_unknown_values_are_redacted(capsys) -> N
     assert SENTINEL not in captured.err
 
 
+def test_provider_name_is_rejected_as_model_before_credentials(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    try:
+        main(
+            [
+                "run",
+                "--provider",
+                "openai",
+                "--model",
+                "openai",
+                "--dataset",
+                "datasets/sample.jsonl",
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 2
+
+    captured = capsys.readouterr()
+    assert "must be an API model ID" in captured.err
+    assert "Missing credential" not in captured.err
+
+
 def test_result_schema_does_not_have_credential_or_raw_response_fields() -> None:
     forbidden = {"api_key", "authorization", "headers", "raw_response", "environment"}
 
