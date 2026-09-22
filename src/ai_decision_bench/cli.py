@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TextIO
 
 from ai_decision_bench import __version__
 from ai_decision_bench.evaluator import DatasetError, dataset_sha256, run_benchmark
@@ -51,6 +53,41 @@ class MissingCredentialsError(RuntimeError):
                 )
             )
         super().__init__("\n".join(lines))
+
+
+class _ProgressReporter:
+    """Render compact TTY progress without adding a runtime dependency."""
+
+    _BAR_WIDTH = 20
+
+    def __init__(self, provider: str, stream: TextIO | None = None) -> None:
+        self.provider = provider
+        self.stream = stream or sys.stderr
+        self.interactive = self.stream.isatty()
+        self.started = time.perf_counter()
+        self.active = False
+        self.finished = False
+        self.previous_width = 0
+
+    def update(self, completed: int, total: int) -> None:
+        self.active = True
+        ratio = completed / total if total else 1.0
+        elapsed = time.perf_counter() - self.started
+        filled = round(self._BAR_WIDTH * ratio)
+        bar = "#" * filled + "-" * (self._BAR_WIDTH - filled)
+        line = f"{self.provider}: [{bar}] {completed}/{total} ({ratio:.0%}) {elapsed:.1f}s"
+        if self.interactive:
+            padding = " " * max(0, self.previous_width - len(line))
+            end = "\n" if completed == total else "\r"
+            print(f"\r{line}{padding}", end=end, file=self.stream, flush=True)
+            self.previous_width = len(line)
+        elif completed in {0, total}:
+            print(line, file=self.stream, flush=True)
+        self.finished = completed == total
+
+    def close(self) -> None:
+        if self.interactive and self.active and not self.finished:
+            print(file=self.stream, flush=True)
 
 
 def _validate_credentials(provider_names: list[str]) -> None:
@@ -192,17 +229,46 @@ def _format_ms(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.1f}ms"
 
 
+def _format_ece(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.4f}"
+
+
+def _format_cost(report: BenchmarkReport) -> str:
+    metrics = report.metrics
+    if metrics.total_reported_cost_usd is not None:
+        return f"${metrics.total_reported_cost_usd:.6f} reported"
+    if metrics.total_estimated_cost_usd is not None:
+        return f"${metrics.total_estimated_cost_usd:.6f} estimated"
+    return "n/a"
+
+
 def render_summary(reports: list[BenchmarkReport]) -> str:
-    rows = [("Provider", "Accuracy", "Median", "P95", "Failures")]
+    rows = [
+        (
+            "Provider",
+            "Model",
+            "Cases",
+            "Accuracy",
+            "ECE",
+            "Median",
+            "P95",
+            "Failures",
+            "Cost (USD)",
+        )
+    ]
     for report in reports:
         metrics = report.metrics
         rows.append(
             (
                 report.provider,
+                report.model_identifier or report.model or "n/a",
+                str(metrics.total),
                 f"{metrics.accuracy:.1%}",
+                _format_ece(metrics.expected_calibration_error),
                 _format_ms(metrics.latency.median_ms),
                 _format_ms(metrics.latency.p95_ms),
-                str(metrics.failures),
+                f"{metrics.failures} ({metrics.failure_rate:.1%})",
+                _format_cost(report),
             )
         )
     widths = [max(len(row[index]) for row in rows) for index in range(len(rows[0]))]
@@ -218,8 +284,8 @@ def render_markdown(reports: list[BenchmarkReport]) -> str:
     lines = [
         "# ai-decision-bench results",
         "",
-        "| Provider | Model | Accuracy | Median | P95 | Failures |",
-        "|---|---|---:|---:|---:|---:|",
+        "| Provider | Model | Cases | Accuracy | ECE | Median | P95 | Failures | Cost |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for report in reports:
         metrics = report.metrics
@@ -229,10 +295,13 @@ def render_markdown(reports: list[BenchmarkReport]) -> str:
                 (
                     report.provider,
                     report.model_identifier or report.model or "n/a",
+                    str(metrics.total),
                     f"{metrics.accuracy:.1%}",
+                    _format_ece(metrics.expected_calibration_error),
                     _format_ms(metrics.latency.median_ms),
                     _format_ms(metrics.latency.p95_ms),
-                    str(metrics.failures),
+                    f"{metrics.failures} ({metrics.failure_rate:.1%})",
+                    _format_cost(report),
                 )
             )
             + " |"
@@ -262,10 +331,27 @@ async def _run(args: argparse.Namespace) -> list[BenchmarkReport]:
     _validate_credentials([args.provider])
     provider = _make_provider(args.provider, model=args.model, args=args)
     pricing = getattr(provider, "pricing", None)
-    report = await run_benchmark(provider, args.dataset, _config(args, pricing))
+    report = await _run_with_progress(provider, args, pricing)
     if args.output:
         _write_output(args.output, report)
     return [report]
+
+
+async def _run_with_progress(
+    provider: DecisionProvider,
+    args: argparse.Namespace,
+    pricing: PricingRate | None,
+) -> BenchmarkReport:
+    progress = _ProgressReporter(provider.name)
+    try:
+        return await run_benchmark(
+            provider,
+            args.dataset,
+            _config(args, pricing),
+            progress_callback=progress.update,
+        )
+    finally:
+        progress.close()
 
 
 def _parse_providers(value: str) -> list[str]:
@@ -285,7 +371,7 @@ async def _compare(args: argparse.Namespace) -> list[BenchmarkReport]:
         model = args.typesafe_model if name == "typesafe" else args.openai_model
         provider = _make_provider(name, model=model, args=args)
         pricing = getattr(provider, "pricing", None)
-        reports.append(await run_benchmark(provider, args.dataset, _config(args, pricing)))
+        reports.append(await _run_with_progress(provider, args, pricing))
     if args.output:
         comparison = ComparisonReport(
             timestamp=datetime.now(UTC),
@@ -308,9 +394,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(render_summary(reports))
-    for report in reports:
-        if report.metrics.expected_calibration_error is not None:
-            print(f"{report.provider} ECE: {report.metrics.expected_calibration_error:.4f}")
+    if args.output:
+        print(f"\nResult written to: {args.output}")
     return 0
 
 

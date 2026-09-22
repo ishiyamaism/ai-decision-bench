@@ -159,12 +159,17 @@ to `1`. Each adapter uses finite timeouts and retries:
 The summary reports measurements only:
 
 ```text
-Provider  Accuracy  Median  P95    Failures
---------  --------  ------  -----  --------
-mock      100.0%    0.0ms   0.0ms  0
+mock: [####################] 24/24 (100%) 0.0s
+
+Provider  Model                Cases  Accuracy  ECE     Median  P95    Failures  Cost (USD)
+--------  -------------------  -----  --------  ------  ------  -----  --------  ----------
+mock      keyword-baseline-v1  24     100.0%    0.1000  0.0ms   0.0ms  0 (0.0%)  n/a
 ```
 
 Mock values vary by machine and are not real-provider performance results.
+Interactive terminals update the progress bar in place. In redirected output, only the
+start and completion progress lines are written to stderr; the result table remains on
+stdout.
 
 ## Metrics
 

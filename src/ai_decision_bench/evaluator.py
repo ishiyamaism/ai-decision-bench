@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import platform
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -83,13 +84,25 @@ async def evaluate(
     cases: list[EvaluationCase],
     *,
     concurrency: int,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[CaseEvaluation]:
     """Evaluate every case while preserving dataset order."""
 
     semaphore = asyncio.Semaphore(concurrency)
-    return list(
-        await asyncio.gather(*(_evaluate_case(provider, case, semaphore) for case in cases))
-    )
+    completed = 0
+    total = len(cases)
+    if progress_callback is not None:
+        progress_callback(completed, total)
+
+    async def evaluate_tracked(case: EvaluationCase) -> CaseEvaluation:
+        nonlocal completed
+        evaluation = await _evaluate_case(provider, case, semaphore)
+        completed += 1
+        if progress_callback is not None:
+            progress_callback(completed, total)
+        return evaluation
+
+    return list(await asyncio.gather(*(evaluate_tracked(case) for case in cases)))
 
 
 def safe_dataset_name(path: Path) -> str:
@@ -105,10 +118,17 @@ async def run_benchmark(
     provider: DecisionProvider,
     dataset_path: Path,
     config: BenchmarkConfig,
+    *,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> BenchmarkReport:
-    cases = load_dataset(dataset_path)
     try:
-        evaluations = await evaluate(provider, cases, concurrency=config.concurrency)
+        cases = load_dataset(dataset_path)
+        evaluations = await evaluate(
+            provider,
+            cases,
+            concurrency=config.concurrency,
+            progress_callback=progress_callback,
+        )
     finally:
         await provider.aclose()
     identifiers = {
