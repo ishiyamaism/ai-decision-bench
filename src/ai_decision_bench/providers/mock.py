@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import ClassVar
 
-from ai_decision_bench.models import DecisionResult, EvaluationCase
+from ai_decision_bench.models import DecisionResult, EvaluationCase, JsonScalar
 
 _KEYWORDS: dict[str, tuple[str, ...]] = {
     "billing": ("bill", "charge", "charged", "invoice", "payment", "refund", "receipt"),
@@ -32,6 +33,7 @@ class MockProvider:
     name = "mock"
     model = "keyword-baseline-v1"
     required_env_vars: tuple[str, ...] = ()
+    benchmark_settings: ClassVar[dict[str, JsonScalar]] = {}
 
     async def decide(self, case: EvaluationCase) -> DecisionResult:
         started = time.perf_counter()
@@ -51,11 +53,10 @@ class MockProvider:
             max_score = scored[prediction]
         if max_score == 0 and "other" in case.task.labels:
             prediction = "other"
-        confidence = 0.9 if max_score >= 1 else 0.55
+        provider_confidence = 0.9 if max_score >= 1 else 0.55
         return DecisionResult(
             prediction=prediction,
-            confidence=confidence,
-            confidence_source="provider_reported",
+            provider_confidence=provider_confidence,
             latency_ms=(time.perf_counter() - started) * 1000.0,
             model_identifier=self.model,
         )

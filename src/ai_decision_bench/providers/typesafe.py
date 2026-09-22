@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import os
+from typing import Annotated, ClassVar
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ai_decision_bench.models import DecisionResult, EvaluationCase
+from ai_decision_bench.models import DecisionResult, EvaluationCase, JsonScalar
 from ai_decision_bench.pricing import PricingRate
 from ai_decision_bench.providers._http import post_json
 
 TYPESAFE_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_TYPESAFE_MODEL = "jev-latest"
+Probability = Annotated[float, Field(ge=0.0, le=1.0)]
 
 
 class MissingTypeSafeKeyError(RuntimeError):
@@ -27,7 +29,7 @@ class _ChoiceAnswer(BaseModel):
 
     type: str
     choice: str
-    probabilities: dict[str, float]
+    probabilities: dict[str, Probability]
     confidence: float = Field(ge=0.0, le=1.0)
 
 
@@ -47,10 +49,11 @@ class _TypeSafeResponse(BaseModel):
 
 
 class TypeSafeProvider:
-    """Classify with Jev Choice and preserve its native confidence."""
+    """Classify with Jev Choice while keeping probability and certainty distinct."""
 
     name = "typesafe"
     required_env_vars = ("TYPESAFE_API_KEY",)
+    benchmark_settings: ClassVar[dict[str, JsonScalar]] = {}
 
     def __init__(
         self,
@@ -101,7 +104,11 @@ class TypeSafeProvider:
         try:
             response = _TypeSafeResponse.model_validate(outcome.data)
             answer = response.answers["classification"]
-            if answer.type != "choice" or answer.choice not in case.task.labels:
+            if (
+                answer.type != "choice"
+                or answer.choice not in case.task.labels
+                or answer.choice not in answer.probabilities
+            ):
                 raise ValueError("unexpected choice answer")
         except (KeyError, ValueError, ValidationError):
             return DecisionResult(latency_ms=outcome.latency_ms, error="invalid_response")
@@ -112,8 +119,9 @@ class TypeSafeProvider:
         )
         return DecisionResult(
             prediction=answer.choice,
-            confidence=answer.confidence,
-            confidence_source="native_probability",
+            prediction_probability=answer.probabilities[answer.choice],
+            probability_source="native_probability",
+            provider_confidence=answer.confidence,
             latency_ms=outcome.latency_ms,
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,

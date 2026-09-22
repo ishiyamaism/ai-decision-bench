@@ -18,7 +18,11 @@ from ai_decision_bench.models import BenchmarkConfig, BenchmarkReport, Compariso
 from ai_decision_bench.pricing import PricingRate, find_pricing
 from ai_decision_bench.providers.base import DecisionProvider
 from ai_decision_bench.providers.mock import MockProvider
-from ai_decision_bench.providers.openai import OpenAIProvider
+from ai_decision_bench.providers.openai import (
+    DEFAULT_OPENAI_MAX_OUTPUT_TOKENS,
+    DEFAULT_OPENAI_REASONING_EFFORT,
+    OpenAIProvider,
+)
 from ai_decision_bench.providers.typesafe import DEFAULT_TYPESAFE_MODEL, TypeSafeProvider
 
 _PROVIDER_CLASSES = {
@@ -136,6 +140,25 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_openai_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--openai-reasoning-effort",
+        default=DEFAULT_OPENAI_REASONING_EFFORT,
+        metavar="LEVEL",
+        help=f"Responses API reasoning effort (default: {DEFAULT_OPENAI_REASONING_EFFORT})",
+    )
+    parser.add_argument(
+        "--openai-max-output-tokens",
+        type=int,
+        default=DEFAULT_OPENAI_MAX_OUTPUT_TOKENS,
+        metavar="TOKENS",
+        help=(
+            "Responses API output-token cap including reasoning tokens "
+            f"(default: {DEFAULT_OPENAI_MAX_OUTPUT_TOKENS})"
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _SafeArgumentParser(
         prog="ai-decision-bench",
@@ -147,6 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Run one provider")
     run_parser.add_argument("--provider", choices=_PROVIDERS, required=True)
     run_parser.add_argument("--model", help="Provider model identifier")
+    _add_openai_options(run_parser)
     _add_common_options(run_parser)
 
     compare_parser = subparsers.add_parser("compare", help="Measure multiple providers")
@@ -157,6 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare_parser.add_argument("--typesafe-model", help="TypeSafe model override")
     compare_parser.add_argument("--openai-model", help="OpenAI model (or use OPENAI_MODEL)")
+    _add_openai_options(compare_parser)
     _add_common_options(compare_parser)
     return parser
 
@@ -168,6 +193,10 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--timeout must be greater than 0")
     if args.max_retries < 0:
         parser.error("--max-retries must be at least 0")
+    if not args.openai_reasoning_effort.strip():
+        parser.error("--openai-reasoning-effort must not be empty")
+    if args.openai_max_output_tokens < 1:
+        parser.error("--openai-max-output-tokens must be at least 1")
     prices = (args.input_price_per_million, args.output_price_per_million)
     if any(price is not None and price < 0 for price in prices):
         parser.error("pricing overrides must be non-negative")
@@ -224,12 +253,18 @@ def _make_provider(
             model=resolved_model,
             timeout_seconds=args.timeout,
             max_retries=args.max_retries,
+            reasoning_effort=args.openai_reasoning_effort,
+            max_output_tokens=args.openai_max_output_tokens,
             pricing=_pricing_for(args, name, resolved_model),
         )
     raise ValueError("unsupported provider")
 
 
-def _config(args: argparse.Namespace, pricing: PricingRate | None) -> BenchmarkConfig:
+def _config(
+    args: argparse.Namespace,
+    pricing: PricingRate | None,
+    provider: DecisionProvider,
+) -> BenchmarkConfig:
     return BenchmarkConfig(
         concurrency=args.concurrency,
         timeout_seconds=args.timeout,
@@ -237,6 +272,7 @@ def _config(args: argparse.Namespace, pricing: PricingRate | None) -> BenchmarkC
         input_price_per_million_usd=(pricing.input_per_million_usd if pricing else None),
         output_price_per_million_usd=(pricing.output_per_million_usd if pricing else None),
         pricing_reference_date=pricing.reference_date if pricing else None,
+        provider_settings=provider.benchmark_settings,
     )
 
 
@@ -265,6 +301,7 @@ def render_summary(reports: list[BenchmarkReport]) -> str:
             "Cases",
             "Accuracy",
             "ECE",
+            "ECE cases",
             "Median",
             "P95",
             "Failures",
@@ -280,6 +317,7 @@ def render_summary(reports: list[BenchmarkReport]) -> str:
                 str(metrics.total),
                 f"{metrics.accuracy:.1%}",
                 _format_ece(metrics.expected_calibration_error),
+                f"{metrics.calibration_case_count}/{metrics.total}",
                 _format_ms(metrics.latency.median_ms),
                 _format_ms(metrics.latency.p95_ms),
                 f"{metrics.failures} ({metrics.failure_rate:.1%})",
@@ -325,8 +363,9 @@ def render_markdown(reports: list[BenchmarkReport]) -> str:
     lines = [
         "# ai-decision-bench results",
         "",
-        "| Provider | Model | Cases | Accuracy | ECE | Median | P95 | Failures | Cost |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Provider | Model | Cases | Accuracy | ECE | ECE cases | Median | P95 | "
+        "Failures | Cost |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for report in reports:
         metrics = report.metrics
@@ -339,6 +378,7 @@ def render_markdown(reports: list[BenchmarkReport]) -> str:
                     str(metrics.total),
                     f"{metrics.accuracy:.1%}",
                     _format_ece(metrics.expected_calibration_error),
+                    f"{metrics.calibration_case_count}/{metrics.total}",
                     _format_ms(metrics.latency.median_ms),
                     _format_ms(metrics.latency.p95_ms),
                     f"{metrics.failures} ({metrics.failure_rate:.1%})",
@@ -388,7 +428,7 @@ async def _run_with_progress(
         return await run_benchmark(
             provider,
             args.dataset,
-            _config(args, pricing),
+            _config(args, pricing, provider),
             progress_callback=progress.update,
         )
     finally:

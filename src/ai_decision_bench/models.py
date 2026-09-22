@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 JsonScalar = str | bool | int | float | None
-ConfidenceSource = Literal[
+ProbabilitySource = Literal[
     "native_probability",
     "provider_reported",
     "model_self_reported",
@@ -40,7 +40,7 @@ class ClassificationTask(BaseModel):
 
 
 class EvaluationCase(BaseModel):
-    """One labelled example from a JSONL dataset."""
+    """One labeled example from a JSONL dataset."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -62,16 +62,26 @@ class DecisionResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     prediction: JsonScalar = None
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    confidence_source: ConfidenceSource = "unavailable"
+    prediction_probability: float | None = Field(default=None, ge=0.0, le=1.0)
+    probability_source: ProbabilitySource = "unavailable"
+    provider_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     latency_ms: float = Field(ge=0.0)
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
     reported_cost_usd: float | None = Field(default=None, ge=0.0)
     estimated_cost_usd: float | None = Field(default=None, ge=0.0)
     cost_source: CostSource = "unknown"
     model_identifier: str | None = None
     error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_probability_source(self) -> DecisionResult:
+        if self.prediction_probability is None and self.probability_source != "unavailable":
+            raise ValueError("probability_source must be unavailable without a probability")
+        if self.prediction_probability is not None and self.probability_source == "unavailable":
+            raise ValueError("probability_source is required with a probability")
+        return self
 
 
 class CaseEvaluation(BaseModel):
@@ -91,10 +101,10 @@ class LatencyMetrics(BaseModel):
     max_ms: float | None
 
 
-class ConfidenceBucket(BaseModel):
+class CalibrationBucket(BaseModel):
     range: str
     count: int
-    average_confidence: float | None
+    average_prediction_probability: float | None
     accuracy: float | None
 
 
@@ -106,7 +116,9 @@ class BenchmarkMetrics(BaseModel):
     accuracy: float
     failure_rate: float
     latency: LatencyMetrics
-    confidence_buckets: list[ConfidenceBucket]
+    calibration_case_count: int = Field(ge=0)
+    calibration_coverage: float = Field(ge=0.0, le=1.0)
+    calibration_buckets: list[CalibrationBucket]
     expected_calibration_error: float | None
     total_reported_cost_usd: float | None
     total_estimated_cost_usd: float | None
@@ -119,6 +131,7 @@ class BenchmarkConfig(BaseModel):
     input_price_per_million_usd: float | None = Field(default=None, ge=0.0)
     output_price_per_million_usd: float | None = Field(default=None, ge=0.0)
     pricing_reference_date: str | None = None
+    provider_settings: dict[str, JsonScalar] = Field(default_factory=dict)
 
 
 class BenchmarkReport(BaseModel):

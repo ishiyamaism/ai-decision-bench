@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
-from ai_decision_bench.cli import _ProgressReporter, main, render_summary
+from ai_decision_bench.cli import _config, _ProgressReporter, build_parser, main, render_summary
 from ai_decision_bench.evaluator import run_benchmark
 from ai_decision_bench.models import (
     BenchmarkConfig,
@@ -31,7 +33,8 @@ def test_mock_provider_is_deterministic() -> None:
     second = asyncio.run(provider.decide(case))
 
     assert first.prediction == second.prediction == "technical_support"
-    assert first.confidence == second.confidence
+    assert first.prediction_probability is second.prediction_probability is None
+    assert first.provider_confidence == second.provider_confidence
     assert first.error is None
 
 
@@ -55,9 +58,59 @@ def test_benchmark_reports_incremental_progress() -> None:
     summary = render_summary([report])
     assert "Cases" in summary
     assert "ECE" in summary
+    assert "0/24" in summary
     assert "Failures" in summary
     assert "Cost (USD)" in summary
     assert "keyword-baseline-v1" in summary
+
+
+def test_openai_settings_are_recorded_in_result_json() -> None:
+    args = build_parser().parse_args(
+        [
+            "run",
+            "--provider",
+            "openai",
+            "--model",
+            "example-model",
+            "--openai-reasoning-effort",
+            "medium",
+            "--openai-max-output-tokens",
+            "8192",
+            "--dataset",
+            "datasets/sample.jsonl",
+        ]
+    )
+    provider_metadata = SimpleNamespace(
+        benchmark_settings={
+            "reasoning_effort": args.openai_reasoning_effort,
+            "max_output_tokens": args.openai_max_output_tokens,
+        }
+    )
+    config = _config(args, None, provider_metadata)
+    report = asyncio.run(run_benchmark(MockProvider(), Path("datasets/sample.jsonl"), config))
+    saved = json.loads(report.model_dump_json())
+
+    assert saved["config"]["provider_settings"] == {
+        "reasoning_effort": "medium",
+        "max_output_tokens": 8192,
+    }
+
+
+def test_openai_reasoning_defaults_are_explicit() -> None:
+    args = build_parser().parse_args(
+        [
+            "run",
+            "--provider",
+            "openai",
+            "--model",
+            "example-model",
+            "--dataset",
+            "datasets/sample.jsonl",
+        ]
+    )
+
+    assert args.openai_reasoning_effort == "low"
+    assert args.openai_max_output_tokens == 25_000
 
 
 def test_non_interactive_progress_prints_only_start_and_finish() -> None:

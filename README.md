@@ -1,18 +1,20 @@
 # ai-decision-bench
 
+[![CI](https://github.com/ishiyamaism/ai-decision-bench/actions/workflows/test.yml/badge.svg)](https://github.com/ishiyamaism/ai-decision-bench/actions/workflows/test.yml)
+
 A small, reproducible benchmark for structured AI decision APIs.
 
-Evaluate structured decisions on your own labelled datasets across multiple providers
+Evaluate structured decisions on your own labeled datasets across multiple providers
 using the same metrics and evaluation pipeline. Bring your own dataset and provider
 credentials; the bundled synthetic dataset is only a runnable example.
 
 ## Why
 
-Accuracy alone does not describe an operational decision API. Confidence calibration,
-latency, cost, and failure behavior also affect whether a structured decision is useful
-in a real workflow. This harness sends the same source input, label definitions, and
-expected answer through each provider adapter, then normalizes the result before
-calculating metrics.
+Accuracy alone does not describe an operational decision API. Prediction-probability
+calibration, latency, cost, and failure behavior also affect whether a structured
+decision is useful in a real workflow. This harness sends the same source input, label
+definitions, and expected answer through each provider adapter, then normalizes the
+result before calculating metrics.
 
 This project measures provider behavior. It does not choose a winner, create an overall
 score, or recommend a provider.
@@ -23,7 +25,7 @@ score, or recommend a provider.
 - Bring your own API keys
 - Provider-neutral evaluation interface
 - Accuracy and failure-rate measurement
-- Confidence buckets and Expected Calibration Error (ECE)
+- Prediction-probability calibration, coverage, and Expected Calibration Error (ECE)
 - Mean, median, and p95 latency
 - Reported versus estimated cost metadata
 - Dataset SHA-256 and reproducible JSON or Markdown results
@@ -62,7 +64,7 @@ The mock is operational scaffolding, not an AI-performance baseline.
 
 ## Use your own dataset
 
-The primary workflow is to point the CLI at a labelled JSONL file you control:
+The primary workflow is to point the CLI at a labeled JSONL file you control:
 
 ```bash
 uv run ai-decision-bench run \
@@ -112,7 +114,10 @@ uv run ai-decision-bench run \
 
 `TypeSafeProvider` uses the official System One HTTP endpoint and a Choice question.
 The default model alias is `jev-latest`; use `--model` or `TYPESAFE_DEFAULT_MODEL` to
-override it. Jev's returned confidence is marked `native_probability`.
+override it. For each Choice result, `prediction_probability` is
+`answer.probabilities[answer.choice]`. TypeSafe's separate `answer.confidence` certainty
+statistic is retained as `provider_confidence`; it is not labeled as a native probability
+and is not used for ECE.
 
 ### OpenAI
 
@@ -126,8 +131,26 @@ uv run ai-decision-bench run \
 
 The model is never hard-coded. It can also be set with `OPENAI_MODEL`. The adapter uses
 the Responses API with strict JSON Schema Structured Outputs and sets `store=false`.
-OpenAI classification confidence is `null`: the harness does not ask a model to report
+OpenAI `prediction_probability` is `null`: the harness does not ask a model to report
 its own confidence and present that value as a native probability.
+
+OpenAI reasoning configuration is explicit and reproducible. The narrow classification
+default is reasoning effort `low`; the output-token cap defaults to `25000`, following
+the official reasoning guide's starting headroom. `max_output_tokens` includes both
+visible output and reasoning tokens. Override either value when the selected model or
+experiment calls for it:
+
+```bash
+uv run ai-decision-bench run \
+  --provider openai \
+  --model YOUR_MODEL_ID \
+  --openai-reasoning-effort low \
+  --openai-max-output-tokens 25000 \
+  --dataset datasets/sample.jsonl
+```
+
+Both values are sent to the Responses API and saved under `config.provider_settings` in
+the result JSON.
 
 ### Mock
 
@@ -161,9 +184,9 @@ The summary reports measurements only:
 ```text
 mock: [####################] Processed 24/24 (100%) 0.0s
 
-Provider  Model                Cases  Accuracy  ECE     Median  P95    Failures  Cost (USD)
---------  -------------------  -----  --------  ------  ------  -----  --------  ----------
-mock      keyword-baseline-v1  24     100.0%    0.1000  0.0ms   0.0ms  0 (0.0%)  n/a
+Provider  Model                Cases  Accuracy  ECE  ECE cases  Median  P95    Failures  Cost (USD)
+--------  -------------------  -----  --------  ---  ---------  ------  -----  --------  ----------
+mock      keyword-baseline-v1  24     100.0%    n/a  0/24       0.0ms   0.0ms  0 (0.0%)  n/a
 ```
 
 Mock values vary by machine and are not real-provider performance results.
@@ -185,16 +208,29 @@ Provider names are not model IDs. For example, use an OpenAI API model ID with
 - **Latency:** wall-clock time from the start of a provider operation until its complete
   response or failure, including retry backoff. Local dataset loading, metric calculation,
   and result-file writing are excluded. Mean, median, p95, minimum, and maximum are saved.
-- **Confidence calibration:** successful cases with confidence are grouped into buckets
-  with count, average confidence, and observed accuracy.
-- **ECE:** Expected Calibration Error summarizes how closely stated confidence matches
-  observed accuracy. Lower is better for that provider and dataset.
+- **Prediction-probability calibration:** successful cases that provide a
+  `prediction_probability` are grouped into buckets with count, average selected-label
+  probability, and observed accuracy.
+- **ECE:** Expected Calibration Error uses the probability assigned to the provider's
+  selected label. For TypeSafe Choice this is exactly
+  `answer.probabilities[answer.choice]`; `answer.confidence` is not an ECE input. ECE is
+  the case-count-weighted absolute gap between each bucket's average selected-label
+  probability and observed accuracy. Lower is better for that provider and dataset.
+- **Calibration coverage:** `calibration_case_count` records the number of cases used by
+  ECE, and `calibration_coverage` divides that count by all benchmark cases. The summary
+  displays the same information as `ECE cases` (for example, `24/24`). ECE is `n/a` when
+  no comparable prediction probability is available.
 - **Cost:** provider-reported cost and token-based estimated cost are separate fields.
-  Unknown cost stays `null`, not zero.
+  Totals include every case with cost metadata, including failed or incomplete decisions;
+  they are intended to approximate benchmark-run consumption rather than successful-only
+  consumption. Unknown cost stays `null`, not zero.
 
-Confidence semantics are not necessarily equivalent across providers. Native,
-provider-reported, model-self-reported, and unavailable confidence sources are recorded
-separately. The current OpenAI adapter reports confidence as unavailable.
+`provider_confidence` is kept separate from `prediction_probability`. It may be useful for
+provider-specific routing, but it is not treated as a universal cross-provider score.
+Native, provider-reported, model-self-reported, and unavailable probability sources are
+recorded separately. The current OpenAI adapter reports prediction probability as
+unavailable, so its ECE is `n/a` rather than an invented self-reported value. Accuracy,
+latency, cost, and failure behavior remain directly measurable for that run.
 
 ## Pricing
 
@@ -225,10 +261,16 @@ Use `--output path.json` or `--output path.md`. JSON includes:
 - provider and requested/resolved model identifiers;
 - safe dataset name and SHA-256;
 - benchmark and Python versions;
-- concurrency, timeout, retry, and pricing configuration;
+- concurrency, timeout, retry, pricing, and provider-specific safe configuration;
 - aggregate metrics; and
-- per-case expected value, normalized prediction, confidence metadata, usage, cost, and
-  sanitized error category.
+- per-case expected value, normalized prediction, prediction probability,
+  provider-specific confidence, input/output/reasoning usage, cost, and sanitized error
+  category.
+
+When OpenAI returns a valid Responses API object but the response is incomplete or its
+structured prediction cannot be used, the case still fails for accuracy and failure-rate
+purposes. Available model, token usage, and estimated cost metadata are nevertheless
+retained and included in aggregate cost.
 
 Source dataset inputs, HTTP headers, credentials, and raw provider responses are not
 written. A dataset hash distinguishes files that have the same name but different
@@ -274,7 +316,7 @@ publish fixed workflow evaluations. The official
 [System One Adapter](https://github.com/typesafe-ai/system-one-adapter-python) executes
 TypeSafe-style questions through regular LLM providers.
 
-`ai-decision-bench` has a different scope: run a user's labelled dataset through
+`ai-decision-bench` has a different scope: run a user's labeled dataset through
 provider-neutral adapters and calculate the same metrics locally. Design research and the
 dependency decision are recorded in [docs/design.md](docs/design.md).
 
@@ -285,7 +327,10 @@ dependency decision are recorded in [docs/design.md](docs/design.md).
 - Accuracy changes with dataset selection, labels, and rubric quality.
 - Latency depends on network path, provider load, rate limits, and region.
 - Pricing changes and estimates are not invoices.
-- Confidence can mean different things across providers.
+- Provider-specific confidence statistics can mean different things across providers;
+  only selected-label probabilities feed ECE.
+- Some providers do not expose a comparable prediction probability, so calibration
+  coverage can be zero and ECE can be `n/a`.
 - ECE on a small dataset is noisy.
 - The harness and its timing measurements have measurement error.
 - A sample run is not sufficient evidence of production suitability.
@@ -310,8 +355,11 @@ uv run ai-decision-bench --version
 ## API references
 
 - [TypeSafe HTTP API](https://docs.typesafe.ai/api)
+- [TypeSafe Choice response semantics](https://docs.typesafe.ai/primitives/choice)
+- [TypeSafe confidence semantics](https://docs.typesafe.ai/confidence)
 - [TypeSafe models and dated pricing](https://docs.typesafe.ai/models)
 - [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+- [OpenAI reasoning guide](https://developers.openai.com/api/docs/guides/reasoning)
 - [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
 
 ## License

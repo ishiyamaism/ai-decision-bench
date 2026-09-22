@@ -8,8 +8,8 @@ from collections.abc import Iterable
 
 from ai_decision_bench.models import (
     BenchmarkMetrics,
+    CalibrationBucket,
     CaseEvaluation,
-    ConfidenceBucket,
     LatencyMetrics,
 )
 
@@ -48,47 +48,51 @@ def _latency_metrics(evaluations: list[CaseEvaluation]) -> LatencyMetrics:
     )
 
 
-def _in_bucket(confidence: float, lower: float, upper: float) -> bool:
-    return lower <= confidence <= upper if upper == 1.0 else lower <= confidence < upper
+def _in_bucket(probability: float, lower: float, upper: float) -> bool:
+    return lower <= probability <= upper if upper == 1.0 else lower <= probability < upper
 
 
-def _confidence_metrics(
+def _calibration_metrics(
     evaluations: list[CaseEvaluation],
-) -> tuple[list[ConfidenceBucket], float | None]:
+) -> tuple[list[CalibrationBucket], int, float | None]:
     calibrated = [
         item
         for item in evaluations
-        if item.result.error is None and item.result.confidence is not None
+        if item.result.error is None and item.result.prediction_probability is not None
     ]
-    buckets: list[ConfidenceBucket] = []
+    buckets: list[CalibrationBucket] = []
     weighted_error = 0.0
     for lower, upper, label in _BUCKETS:
         members = [
-            item for item in calibrated if _in_bucket(item.result.confidence or 0.0, lower, upper)
+            item
+            for item in calibrated
+            if _in_bucket(item.result.prediction_probability or 0.0, lower, upper)
         ]
         if not members:
             buckets.append(
-                ConfidenceBucket(
+                CalibrationBucket(
                     range=label,
                     count=0,
-                    average_confidence=None,
+                    average_prediction_probability=None,
                     accuracy=None,
                 )
             )
             continue
-        average_confidence = statistics.fmean(item.result.confidence or 0.0 for item in members)
+        average_probability = statistics.fmean(
+            item.result.prediction_probability or 0.0 for item in members
+        )
         accuracy = sum(item.correct for item in members) / len(members)
-        weighted_error += len(members) * abs(average_confidence - accuracy)
+        weighted_error += len(members) * abs(average_probability - accuracy)
         buckets.append(
-            ConfidenceBucket(
+            CalibrationBucket(
                 range=label,
                 count=len(members),
-                average_confidence=average_confidence,
+                average_prediction_probability=average_probability,
                 accuracy=accuracy,
             )
         )
     ece = weighted_error / len(calibrated) if calibrated else None
-    return buckets, ece
+    return buckets, len(calibrated), ece
 
 
 def _optional_sum(values: Iterable[float | None]) -> float | None:
@@ -102,7 +106,7 @@ def calculate_metrics(evaluations: list[CaseEvaluation]) -> BenchmarkMetrics:
     total = len(evaluations)
     failures = sum(item.result.error is not None for item in evaluations)
     correct = sum(item.correct for item in evaluations)
-    buckets, ece = _confidence_metrics(evaluations)
+    buckets, calibration_case_count, ece = _calibration_metrics(evaluations)
     return BenchmarkMetrics(
         total=total,
         successful=total - failures,
@@ -111,7 +115,9 @@ def calculate_metrics(evaluations: list[CaseEvaluation]) -> BenchmarkMetrics:
         accuracy=correct / total if total else 0.0,
         failure_rate=failures / total if total else 0.0,
         latency=_latency_metrics(evaluations),
-        confidence_buckets=buckets,
+        calibration_case_count=calibration_case_count,
+        calibration_coverage=calibration_case_count / total if total else 0.0,
+        calibration_buckets=buckets,
         expected_calibration_error=ece,
         total_reported_cost_usd=_optional_sum(
             item.result.reported_cost_usd for item in evaluations
