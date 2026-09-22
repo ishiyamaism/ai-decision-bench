@@ -62,6 +62,18 @@ uv run ai-decision-bench run \
 
 The mock is operational scaffolding, not an AI-performance baseline.
 
+## Fork and customize
+
+This repository is MIT licensed. You are welcome to clone it, fork it, give it to your
+preferred AI coding agent, add providers or metrics, and adapt it to your own decision
+problems without asking for permission. Keep the license notice when redistributing it.
+
+Coding agents should read [AGENTS.md](AGENTS.md) first. It records the architecture,
+benchmark semantics, privacy boundaries, provider-extension checklist, and validation
+commands that are easy to lose when a repository is edited from a short prompt. See
+[CONTRIBUTING.md](CONTRIBUTING.md) if you want to propose a change back upstream; private
+forks do not need to contribute their changes.
+
 ## Use your own dataset
 
 The primary workflow is to point the CLI at a labeled JSONL file you control:
